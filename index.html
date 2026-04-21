@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Mapa Inteligente - Lotes BA</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+
+<style>
+body{margin:0;font-family:Arial;background:#f4f6fb}
+#app{display:flex;height:100vh}
+
+/* PAINEL */
+#painel{
+  width:320px;
+  background:#fff;
+  padding:15px;
+  border-right:1px solid #ddd;
+  overflow:auto;
+  transition:.3s;
+}
+
+/* MAPA */
+#map{flex:1}
+
+/* BOTÃO MOBILE */
+#btnMenu{
+  display:none;
+  position:absolute;
+  top:10px;
+  left:10px;
+  z-index:999;
+  background:#1F3864;
+  color:#fff;
+  border:none;
+  padding:10px;
+  border-radius:8px;
+  font-size:14px;
+  box-shadow:0 2px 6px rgba(0,0,0,.3);
+}
+
+/* FILTROS */
+select,button{
+  width:100%;
+  padding:8px;
+  margin-bottom:6px;
+  border-radius:6px;
+  border:1px solid #ccc;
+}
+
+/* LOTES */
+.lote{
+  padding:8px;
+  margin-bottom:6px;
+  border-radius:6px;
+  cursor:pointer;
+  display:flex;
+  justify-content:space-between;
+  border:1px solid #ddd;
+}
+.lote.ativo{
+  color:#fff;
+  font-weight:bold;
+}
+
+/* MARCADOR */
+.marker{
+  width:16px;
+  height:16px;
+  border-radius:50%;
+  border:2px solid #fff;
+  box-shadow:0 0 4px rgba(0,0,0,.4);
+}
+
+/* TOOLTIP */
+.leaflet-tooltip.label-fixa{
+  background: rgba(31,56,100,0.92) !important;
+  color:#fff;
+  border:none !important;
+  border-radius:6px;
+  padding:4px 8px;
+  font-size:10px;
+  font-weight:600;
+  text-align:center;
+  box-shadow:0 2px 6px rgba(0,0,0,.35);
+}
+
+/* ========================= */
+/* 📱 MOBILE */
+/* ========================= */
+@media (max-width:768px){
+
+  #app{
+    flex-direction:column;
+  }
+
+  #painel{
+    position:absolute;
+    left:-100%;
+    top:0;
+    height:100%;
+    width:85%;
+    z-index:1000;
+    box-shadow:2px 0 10px rgba(0,0,0,.2);
+  }
+
+  #painel.aberto{
+    left:0;
+  }
+
+  #btnMenu{
+    display:block;
+  }
+
+  #map{
+    height:100vh;
+  }
+
+  .leaflet-tooltip.label-fixa{
+    font-size:9px;
+    padding:3px 6px;
+  }
+
+  .marker{
+    width:14px;
+    height:14px;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<button id="btnMenu" onclick="togglePainel()">☰ Filtros</button>
+
+<div id="app">
+
+<div id="painel">
+  <h3>Filtros</h3>
+
+  <select id="f-evento"><option value="">Evento</option></select>
+  <select id="f-dem"><option value="">Órgão</option></select>
+  <select id="f-tipo"><option value="">Tipo</option></select>
+
+  <button onclick="resetFiltros()">Limpar</button>
+
+  <h3>Lotes</h3>
+  <div id="lotes"></div>
+</div>
+
+<div id="map"></div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+<script>
+
+// =======================
+var POSTOS=[];
+var LOTES=[];
+var markers=[];
+var poligonos=[];
+var loteAtivo=null;
+var coresLotes={};
+
+var map=L.map('map').setView([-12.97,-38.51],12);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// =======================
+// MOBILE MENU
+function togglePainel(){
+  document.getElementById("painel").classList.toggle("aberto");
+}
+
+// =======================
+// COR LOTE
+function corLote(i,total){
+  return `hsl(${(i*360/total)},70%,50%)`;
+}
+
+// =======================
+// CONVEX HULL
+function convexHull(points){
+  if(points.length < 3) return points;
+  points.sort((a,b)=> a[0]===b[0]?a[1]-b[1]:a[0]-b[0]);
+
+  const cross=(o,a,b)=> (a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]);
+
+  let lower=[];
+  for(let p of points){
+    while(lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0){
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  let upper=[];
+  for(let i=points.length-1;i>=0;i--){
+    let p=points[i];
+    while(upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0){
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+// =======================
+async function carregarDados(){
+  const res=await fetch("https://script.google.com/macros/s/AKfycbzO3CxkaujHwu7Zx7KLqAzjfpUurxY_5IyR6FhqeJRaudKxwjOm9QAFSjEXh1g1H0qvtA/exec");
+  const data=await res.json();
+
+  POSTOS=data.map(p=>({
+    nome:p["NOMENCLATURA"],
+    evento:p.EVENTO,
+    dem:p.DEMANDA,
+    tipo:p["TIPO DE ESTRUTURA"],
+    lat:parseFloat(String(p.LATITUDE).replace(",", ".")),
+    lng:parseFloat(String(p.LONGITUDE).replace(",", ".")),
+    lote:p["LOTE PROPOSTO"]||"Sem lote"
+  }));
+
+  gerarLotes();
+  preencherFiltros();
+  render();
+}
+
+// =======================
+function gerarLotes(){
+  let nomes=[...new Set(POSTOS.map(p=>p.lote))];
+
+  LOTES=nomes.map((l,i)=>({
+    id:l,
+    nome:l,
+    cor:corLote(i,nomes.length)
+  }));
+
+  LOTES.forEach(l=>coresLotes[l.id]=l.cor);
+  renderLotes();
+}
+
+function renderLotes(){
+  var el=document.getElementById("lotes");
+  el.innerHTML="";
+
+  LOTES.forEach(l=>{
+    var div=document.createElement("div");
+    div.className="lote"+(loteAtivo===l.id?" ativo":"");
+
+    if(loteAtivo===l.id){
+      div.style.background=l.cor;
+    }
+
+    div.innerHTML=`
+      <span>${l.nome}</span>
+      <span style="width:12px;height:12px;border-radius:50%;background:${l.cor}"></span>
+    `;
+
+    div.onclick=()=>{
+      loteAtivo = loteAtivo===l.id ? null : l.id;
+      render();
+      renderLotes();
+      togglePainel(); // fecha no mobile
+    };
+
+    el.appendChild(div);
+  });
+}
+
+// =======================
+function uniq(a){return [...new Set(a.filter(v=>v))];}
+
+function preencherFiltros(){
+  pop("f-evento",uniq(POSTOS.map(p=>p.evento)));
+  pop("f-dem",uniq(POSTOS.map(p=>p.dem)));
+  pop("f-tipo",uniq(POSTOS.map(p=>p.tipo)));
+}
+
+function pop(id,arr){
+  var s=document.getElementById(id);
+  arr.forEach(v=>{
+    var o=document.createElement("option");
+    o.value=v;o.textContent=v;
+    s.appendChild(o);
+  });
+}
+
+function getFiltros(){
+  return{
+    evento:document.getElementById("f-evento").value,
+    dem:document.getElementById("f-dem").value,
+    tipo:document.getElementById("f-tipo").value
+  };
+}
+
+function resetFiltros(){
+  document.getElementById("f-evento").value="";
+  document.getElementById("f-dem").value="";
+  document.getElementById("f-tipo").value="";
+  loteAtivo=null;
+  render();
+  renderLotes();
+}
+
+// =======================
+function render(){
+
+  markers.forEach(m=>map.removeLayer(m));
+  poligonos.forEach(p=>map.removeLayer(p));
+
+  markers=[];
+  poligonos=[];
+
+  var f=getFiltros();
+
+  var vis=POSTOS.filter(p=>{
+    if(f.evento && p.evento!==f.evento) return false;
+    if(f.dem && p.dem!==f.dem) return false;
+    if(f.tipo && p.tipo!==f.tipo) return false;
+    if(loteAtivo && p.lote!==loteAtivo) return false;
+    return true;
+  });
+
+  vis.forEach(p=>{
+    if(!p.lat || !p.lng) return;
+
+    var cor=coresLotes[p.lote]||"#999";
+
+    var icon=L.divIcon({
+      html:`<div class="marker" style="background:${cor}"></div>`
+    });
+
+    var marker=L.marker([p.lat,p.lng],{icon});
+
+    marker.bindTooltip(
+      `<b>${p.nome}</b><br><span>${p.evento}</span>`,
+      {permanent:true,direction:"top",offset:[0,-12],className:"label-fixa"}
+    );
+
+    marker.bindPopup(`<b>${p.nome}</b><br>${p.evento}`);
+
+    marker.addTo(map);
+    markers.push(marker);
+  });
+
+  let grupos={};
+
+  vis.forEach(p=>{
+    if(!grupos[p.lote]) grupos[p.lote]=[];
+    grupos[p.lote].push([p.lat,p.lng]);
+  });
+
+  Object.keys(grupos).forEach(lote=>{
+    let pts=grupos[lote];
+    if(pts.length < 3) return;
+
+    let hull=convexHull(pts);
+    let cor=coresLotes[lote]||"#999";
+
+    let poly=L.polygon(hull,{
+      color:cor,
+      weight:2,
+      fillOpacity:0.08
+    }).addTo(map);
+
+    poligonos.push(poly);
+  });
+
+  if(vis.length){
+    map.fitBounds(vis.map(p=>[p.lat,p.lng]));
+  }
+}
+
+["f-evento","f-dem","f-tipo"].forEach(id=>{
+  document.getElementById(id).addEventListener("change",render);
+});
+
+carregarDados();
+
+</script>
+
+</body>
+</html>
